@@ -2,13 +2,13 @@
  * ChartController.js - Chart.js integration for real-time metrics plotting
  */
 
-import {$, formatTime} from './UIHelpers.js';
+import { $, formatTime } from './UIHelpers.js';
 
 // Chart is loaded globally via UMD script tag in index.html
 const { Chart } = window;
 
 const MAX_DATA_POINTS = 30;
-const MAX_SERIES = 5;
+const MAX_SERIES = 10;
 
 // Color palette for chart series
 const COLORS = [

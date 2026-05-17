@@ -1,305 +1,240 @@
 /**
- * main.js - Application entry point and orchestrator
- *
- * Initializes all modules, wires them together, handles the load/stop lifecycle.
+ * main.js - Application entry point and orchestrator for Dual-Stream Comparison
  */
 
-import {$, fetchJSON, show} from './UIHelpers.js';
-import {PlayerController} from './PlayerController.js';
-import {ControlBar} from '../../../../contrib/controlbar/ControlBar.js';
-import {StreamCatalog} from './StreamCatalog.js';
-import {SettingsController} from './SettingsController.js';
-import {DrmController} from './DrmController.js';
-import {MetricsDisplay} from './MetricsDisplay.js';
-import {ChartController} from './ChartController.js';
-import {NotificationPanel} from './NotificationPanel.js';
+import { $, fetchJSON } from './UIHelpers.js';
+import { PlayerController } from './PlayerController.js';
+import { SettingsController } from './SettingsController.js';
+import { MetricsDisplay } from './MetricsDisplay.js';
+import { ChartController } from './ChartController.js';
+import { NotificationPanel } from './NotificationPanel.js';
 
 // ---- State ----
-let playerController;
-let controlBar;
-let streamCatalog;
-let settingsController;
-let drmController;
-let metricsDisplay;
-let chartController;
-let notificationPanel;
+let sharedChartController;
+const players = {}; // Object to hold our isolated player instances
 
 // ---- Initialization ----
 async function init() {
-    // Verify dash.js is loaded (UMD script from dist/ must be available)
+    // Verify dash.js is loaded
     if (typeof dashjs === 'undefined') {
-        const msg = 'dash.js library not found. Make sure to run "npm run start" or "npm run build" first ' +
-            'so that dist/modern/umd/dash.all.debug.js is available.';
+        const msg = 'dash.js library not found.';
         console.error(msg);
-        const body = document.body;
-        const alert = document.createElement('div');
-        alert.className = 'alert alert-danger m-4';
-        alert.innerHTML = `<strong>Error:</strong> ${msg}`;
-        body.prepend(alert);
+        document.body.prepend(createAlert(msg));
         return;
     }
 
-    const videoElement = $('#video-element');
+    // 1. Initialize Shared Chart for comparative metrics
+    sharedChartController = new ChartController();
+    sharedChartController.init();
 
-    // 1. Create PlayerController and initialize dash.js
-    playerController = new PlayerController();
-    playerController.init(videoElement, true);
+    // 2. Instantiate Player 1 (Baseline)
+    players.baseline = await setupPlayerInstance(
+        'baseline-container',
+        'Stream 1 (Baseline)',
+        'p1'
+    );
 
-    // Attach TTML rendering div
-    playerController.attachTTMLRenderingDiv($('#video-caption'));
+    // 3. Instantiate Player 2 (Experimental)
+    players.experimental = await setupPlayerInstance(
+        'experimental-container',
+        'Stream 2 (Experimental)',
+        'p2'
+    );
 
-    // 2. Load default config
-    await loadDefaultConfig();
+    // ==========================================
+    // 3.5 Global Synchronization Controls
+    // ==========================================
+    const v1 = players.baseline.playerController.video;
+    const v2 = players.experimental.playerController.video;
+    const syncCheck = document.getElementById('chk-sync-playback');
 
-    // 3. Display version + build commit
-    const version = playerController.getVersion();
-    $('#version-info').textContent = `v${version}`;
-    const commitInfo = $('#commit-info');
-    const buildCommit = typeof __DASHJS_BUILD_COMMIT__ !== 'undefined'
-        ? __DASHJS_BUILD_COMMIT__
-        : 'unknown';
-    if (commitInfo && buildCommit && buildCommit !== 'unknown') {
-        const commitUrl = `https://github.com/Dash-Industry-Forum/dash.js/commit/${buildCommit}`;
-        commitInfo.innerHTML = `commit <a href="${commitUrl}" target="_blank" rel="noopener">${buildCommit}</a>`;
-    }
+    // Global Load (Aligns Chart X-Axis)
+    document.getElementById('btn-global-load').addEventListener('click', () => {
+        // Clear the shared chart first
+        sharedChartController.clearAllData();
 
-    // 4. Initialize all modules
-    controlBar = new ControlBar(playerController.player, videoElement);
-    controlBar.init($('#video-wrapper'));
-    controlBar.disable();
-
-    settingsController = new SettingsController(playerController);
-    settingsController.init();
-
-    drmController = new DrmController();
-    drmController.init();
-
-    streamCatalog = new StreamCatalog();
-    streamCatalog.onStreamSelected = onStreamSelected;
-    await streamCatalog.init('app/data/sources.json');
-
-    chartController = new ChartController();
-    chartController.init();
-
-    metricsDisplay = new MetricsDisplay(playerController, chartController);
-    metricsDisplay.init();
-
-    notificationPanel = new NotificationPanel(playerController);
-    notificationPanel.init();
-
-    // 5. Wire up button handlers
-    $('#btn-load').addEventListener('click', doLoad);
-    $('#btn-stop').addEventListener('click', doStop);
-
-    // Copy URL (includes DRM protData from the DRM controller or the selected stream)
-    $('#btn-copy-url').addEventListener('click', () => {
-        const selectedItem = streamCatalog.getSelectedItem();
-        const protData = drmController.buildProtectionData() || selectedItem?.protData || null;
-        settingsController.copySettingsUrl(protData);
+        // Load both at the exact same millisecond
+        players.baseline.doLoad();
+        players.experimental.doLoad();
     });
 
-    // Allow Enter key in URL field to trigger load
-    $('#stream-url').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            doLoad();
+    // Global Play/Pause
+    document.getElementById('btn-global-play').addEventListener('click', () => {
+        v1.play(); v2.play();
+    });
+    document.getElementById('btn-global-pause').addEventListener('click', () => {
+        v1.pause(); v2.pause();
+    });
+
+    // Optional Master/Slave Time Locking (Baseline dictates time)
+    v1.addEventListener('play', () => { if (syncCheck.checked) v2.play(); });
+    v1.addEventListener('pause', () => { if (syncCheck.checked) v2.pause(); });
+    v1.addEventListener('seeked', () => { if (syncCheck.checked) v2.currentTime = v1.currentTime; });
+    v1.addEventListener('timeupdate', () => {
+        if (syncCheck.checked && !v1.paused) {
+            // Snap Player 2 to Player 1 if it drifts by more than 0.5 seconds
+            if (Math.abs(v1.currentTime - v2.currentTime) > 0.5) {
+                v2.currentTime = v1.currentTime;
+            }
         }
     });
 
-    // 6. Register player events for UI
-    playerController.on('playbackEnded', onPlaybackEnded);
-    playerController.on('streamInitialized', () => {
-        controlBar.enable();
-    });
-    playerController.on('manifestLoaded', (data) => {
-        // Show/hide CMSD metrics if enabled
-        const cmsdEnabled = $('#opt-cmsd-enabled')?.checked || false;
-        metricsDisplay.setCmsdEnabled(cmsdEnabled);
-    });
-
-    // 7. Check HTTP warning
-    if (window.location.protocol === 'http:' && window.location.hostname !== 'localhost') {
-        show('#http-warning');
-    }
-
-    // 8. Apply URL parameters
-    const shouldAutoLoad = settingsController.applyFromUrl();
-
-    // 8b. Apply restored DRM protection data from URL
-    if (settingsController.restoredProtData) {
-        drmController.setFromProtData(settingsController.restoredProtData);
-    }
-
-    // 9. Handle stream URL from query param
-    const params = new URLSearchParams(window.location.search);
-    const streamParam = params.get('stream');
-    if (streamParam) {
-        streamCatalog.setUrl(streamParam);
-    }
-
-    // 10. Auto-load if requested
-    if (shouldAutoLoad || params.get('autoLoad') === 'true') {
-        doLoad();
-    }
-
-    // 11. Theme toggle (light/dark)
+    // 4. Global UI Setup
     initThemeToggle();
-
-    // 12. Load contributors
     loadContributors();
 
-    // 13. Initialize Bootstrap tooltips
     const tooltipElements = document.querySelectorAll('[data-bs-toggle="tooltip"]');
     for (const el of tooltipElements) {
         new bootstrap.Tooltip(el);
     }
 }
 
-// ---- Config loading ----
-async function loadDefaultConfig() {
+/**
+ * Creates and initializes a completely isolated player instance from the HTML template.
+ */
+async function setupPlayerInstance(containerId, title, suffix) {
+    // 1. Clone the template and scope the DOM
+    const container = createPlayerDOM(containerId, title, suffix);
+
+    // 2. Initialize Player Controller
+    const videoElement = $('.video-element', container);
+    const playerController = new PlayerController();
+    playerController.init(videoElement, true);
+
+    // Load default config safely
     try {
         const config = await fetchJSON('app/data/dashjs_config.json');
         playerController.updateSettings(config);
     } catch (err) {
-        // Apply sensible defaults
-        playerController.updateSettings({
-            debug: { logLevel: 3 }  // WARNING
-        });
+        playerController.updateSettings({ debug: { logLevel: 3 } });
     }
+
+    // 3. Initialize Scoped Settings Controller
+    const settingsController = new SettingsController(playerController, container, suffix);
+    settingsController.init();
+
+    // 4. Initialize Scoped Metrics Display
+    const metricsDisplay = new MetricsDisplay(playerController, sharedChartController, container, suffix);
+    metricsDisplay.init();
+
+    // 5. Initialize Scoped Notification Panel
+    const notificationPanel = new NotificationPanel(playerController, container, suffix);
+    notificationPanel.init();
+
+    // 6. Bind Local UI Handlers
+    const loadBtn = $('.btn-load', container);
+    const urlInput = $('.stream-url', container);
+
+    const doLoad = () => {
+        const url = urlInput.value;
+        if (!url) return;
+
+        const config = settingsController.buildConfig();
+        playerController.updateSettings(config);
+        playerController.player.setAutoPlay(settingsController.autoPlay);
+
+        playerController.load(url, null);
+    };
+
+    loadBtn.addEventListener('click', doLoad);
+    urlInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doLoad();
+    });
+
+    // Handle loop fallback
+    playerController.on('playbackEnded', (e) => {
+        if (settingsController.loop && !playerController.isDynamic && e.isLast) {
+            playerController.player.seek(0);
+            playerController.player.play();
+        }
+    });
+
+    return {
+        container,
+        playerController,
+        settingsController,
+        metricsDisplay,
+        notificationPanel,
+        doLoad
+    };
 }
 
-// ---- Stream selection callback ----
-function onStreamSelected(item) {
-    // If stream has embedded DRM protData, load it into DRM controller
-    if (item.protData) {
-        drmController.setFromProtData(item.protData);
-    } else {
-        drmController.clearAll();
-    }
+/**
+ * Helper to clone the UI template and suffix IDs to prevent collisions
+ */
+function createPlayerDOM(containerId, title, suffix) {
+    const template = document.getElementById('player-ui-template');
+    const clone = template.content.cloneNode(true);
+
+    // Set Title
+    clone.querySelector('.instance-title').textContent = title;
+
+    // Suffix IDs and labels
+    clone.querySelectorAll('[id]').forEach(el => el.id = `${el.id}-${suffix}`);
+    clone.querySelectorAll('[for]').forEach(el => el.setAttribute('for', `${el.getAttribute('for')}-${suffix}`));
+
+    // Mount to DOM
+    const wrapper = document.createElement('div');
+    wrapper.id = containerId;
+    wrapper.className = 'player-instance';
+    wrapper.appendChild(clone);
+
+    document.getElementById('dual-players-container').appendChild(wrapper);
+    return document.getElementById(containerId);
 }
 
-// ---- Load / Stop ----
-function doLoad() {
-    const url = streamCatalog.getUrl();
-    if (!url) {
-        return;
-    }
-
-    // Build config from settings UI
-    const config = settingsController.buildConfig();
-    playerController.updateSettings(config);
-
-    // Set auto-play
-    playerController.player.setAutoPlay(settingsController.autoPlay);
-
-    // Build DRM protection data
-    const selectedItem = streamCatalog.getSelectedItem();
-    let protData = drmController.buildProtectionData();
-
-    // If stream item has embedded protData and user hasn't overridden, use stream's
-    if (!protData && selectedItem?.protData) {
-        protData = selectedItem.protData;
-    }
-
-    // Apply initial media settings
-    settingsController.applyInitialMediaSettings();
-
-    // Reset chart
-    chartController.clearAllData();
-
-    // Reset control bar
-    controlBar.reset();
-    controlBar.disable();
-
-    // If mute option is checked, apply to control bar before load
-    if ($('#opt-muted')?.checked) {
-        controlBar.setMuted(true);
-    }
-
-    // Load stream
-    playerController.load(url, protData);
-
-    // Re-apply control bar volume/mute state to the new source
-    controlBar.syncMuteState();
+// ---- Global Helpers ----
+function createAlert(msg) {
+    const alert = document.createElement('div');
+    alert.className = 'alert alert-danger m-4';
+    alert.innerHTML = `<strong>Error:</strong> ${msg}`;
+    return alert;
 }
 
-function doStop() {
-    controlBar.disable();
-    controlBar.reset();
-    playerController.stop();
-    chartController.clearAllData();
-}
-
-// ---- Playback ended (loop) ----
-function onPlaybackEnded(e) {
-    if (settingsController.loop && !playerController.isDynamic && e.isLast) {
-        playerController.player.seek(0);
-        playerController.player.play();
-    }
-}
-
-// ---- Theme toggle ----
 function initThemeToggle() {
-    const select = $('#theme-select');
-    if (!select) {
-        return;
-    }
+    const select = document.getElementById('theme-select');
+    if (!select) return;
 
     const STORAGE_KEY = 'rp-theme';
-    const THEMES = ['light', 'dark', 'latte', 'frappe', 'macchiato', 'mocha'];
+    const THEMES = ['light', 'dark'];
 
     function applyTheme(theme) {
         document.documentElement.setAttribute('data-bs-theme', theme);
         select.value = theme;
-
-        // Update chart colors for new theme
-        if (chartController) {
-            chartController.updateTheme();
-        }
+        if (sharedChartController) sharedChartController.updateTheme();
     }
 
-    // Load saved preference (fall back to 'light')
     const saved = localStorage.getItem(STORAGE_KEY);
-    const initialTheme = THEMES.includes(saved) ? saved : 'light';
-    applyTheme(initialTheme);
+    applyTheme(THEMES.includes(saved) ? saved : 'light');
 
     select.addEventListener('change', () => {
-        const selectedTheme = select.value;
-        const nextTheme = THEMES.includes(selectedTheme) ? selectedTheme : 'light';
+        const nextTheme = THEMES.includes(select.value) ? select.value : 'light';
         localStorage.setItem(STORAGE_KEY, nextTheme);
         applyTheme(nextTheme);
     });
 }
 
-// ---- Contributors ----
 async function loadContributors() {
     try {
         const data = await fetchJSON('app/data/contributors.json');
-        const container = $('#contributor-logos');
-        if (!container || !data.items) {
-            return;
-        }
+        const container = document.getElementById('contributor-logos');
+        if (!container || !data.items) return;
 
         for (const contrib of data.items) {
             const a = document.createElement('a');
             a.href = contrib.link || '#';
             a.target = '_blank';
             a.title = contrib.name || '';
-            a.rel = 'noopener';
-
             if (contrib.logo) {
                 const img = document.createElement('img');
                 img.src = contrib.logo;
-                img.alt = contrib.name || '';
                 a.appendChild(img);
             } else {
-                a.textContent = contrib.name || '';
+                a.textContent = contrib.name;
             }
-
             container.appendChild(a);
         }
-    } catch (err) {
-        // Non-critical
-    }
+    } catch (err) { }
 }
 
 // ---- Start the app ----

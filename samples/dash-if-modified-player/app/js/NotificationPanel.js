@@ -2,7 +2,7 @@
  * NotificationPanel.js - Unified notification display for errors, warnings, and conformance violations
  */
 
-import {$, $$, createElement} from './UIHelpers.js';
+import { createElement } from './UIHelpers.js';
 
 const SEVERITY = {
     ERROR: { key: 'error', label: 'Error', className: 'badge-error' },
@@ -28,8 +28,10 @@ const MAX_ITEMS = 100;
 const DEDUP_WINDOW_MS = 2000;
 
 export class NotificationPanel {
-    constructor(playerController) {
+    constructor(playerController, containerScope, suffix) {
         this.playerController = playerController;
+        this.containerScope = containerScope;
+        this.suffix = suffix;
         this._items = [];
         this._lastLogMessage = '';
         this._lastLogTime = 0;
@@ -38,23 +40,39 @@ export class NotificationPanel {
     }
 
     /**
+     * Helper to find elements by their suffixed ID within this instance's container.
+     */
+    _el(baseId) {
+        return this.containerScope.querySelector(`#${baseId}-${this.suffix}`)
+            || this.containerScope.querySelector(`.${baseId}`)
+            || this.containerScope.querySelector(`#${baseId}`);
+    }
+
+    /**
+     * Helper to find multiple elements within this instance's container.
+     */
+    _els(selector) {
+        return this.containerScope.querySelectorAll(selector);
+    }
+
+    /**
      * Initialize the panel and subscribe to player events
      */
     init() {
         // Clear button
-        const clearBtn = $('#btn-notification-clear');
+        const clearBtn = this._el('btn-notification-clear');
         if (clearBtn) {
             clearBtn.addEventListener('click', () => this._clear());
         }
 
         // Filter buttons
-        const filterBtns = $$('.notification-filter-btn');
+        const filterBtns = this._els('.notification-filter-btn');
         for (const btn of filterBtns) {
             btn.addEventListener('click', () => this._onFilterToggle(btn));
         }
 
         // Search input
-        const searchInput = $('#notification-search');
+        const searchInput = this._el('notification-search');
         if (searchInput) {
             searchInput.addEventListener('input', () => {
                 this._searchQuery = searchInput.value.trim().toLowerCase();
@@ -152,7 +170,7 @@ export class NotificationPanel {
     // ---- DOM manipulation ----
 
     _addNotification(severity, message) {
-        const list = $('#notification-list');
+        const list = this._el('notification-list');
         if (!list) {
             return;
         }
@@ -210,7 +228,7 @@ export class NotificationPanel {
     }
 
     _updateCount() {
-        const countBadge = $('#notification-count');
+        const countBadge = this._el('notification-count');
         if (!countBadge) {
             return;
         }
@@ -224,8 +242,8 @@ export class NotificationPanel {
     }
 
     _clear() {
-        const list = $('#notification-list');
-        const searchInput = $('#notification-search');
+        const list = this._el('notification-list');
+        const searchInput = this._el('notification-search');
 
         if (list) {
             list.innerHTML = '';
@@ -244,20 +262,20 @@ export class NotificationPanel {
     }
 
     _hideEmptyState() {
-        const empty = $('#notification-empty');
+        const empty = this._el('notification-empty');
         if (empty) {
             empty.remove();
         }
     }
 
     _showEmptyState() {
-        const list = $('#notification-list');
-        if (!list || $('#notification-empty')) {
+        const list = this._el('notification-list');
+        if (!list || this._el('notification-empty')) {
             return;
         }
         const el = createElement('div', {
             className: 'notification-empty',
-            id: 'notification-empty',
+            id: `notification-empty-${this.suffix}`, // Suffix the empty state ID to prevent collisions
             textContent: 'No messages'
         });
         list.appendChild(el);
